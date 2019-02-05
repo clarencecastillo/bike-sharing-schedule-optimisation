@@ -1,4 +1,22 @@
 import numpy as np
+import seaborn as sns
+import matplotlib.pylab as plt
+
+def tseriesplot(data, time_col, continuous_col):
+    sns.lineplot(y=continuous_col, x=time_col, data=data, color='c')
+    title = 'Timeseries data of ' + continuous_col
+    plt.title(title, loc = 'center', y=1.1, fontsize = 25)
+    plt.tight_layout()
+    plt.show()
+    plt.close()
+
+def boxplot(data, category_col, continuous_col):
+    sns.boxplot(y=continuous_col, x=category_col, data=data, color='c')
+    title = 'Distribution of ' + continuous_col
+    plt.title(title, loc = 'center', y=1.1, fontsize = 25)
+    plt.tight_layout()
+    plt.show()
+    plt.close()
 
 def haversine(lon1, lat1, lon2, lat2):
     """
