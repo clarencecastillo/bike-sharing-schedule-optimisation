@@ -158,7 +158,7 @@ np.sqrt(mean_squared_error(y_test, lr_predictions))
 # Explained variance score: 1 is perfect prediction
 r2_score(y_test, lr_predictions)
 
-# 2. Random forest
+# 2. Random Forest with Tuning
 
 from sklearn.ensemble import RandomForestRegressor
 
@@ -167,7 +167,6 @@ rf.fit(x_train, y_train.values.ravel())
 rf_predictions = rf.predict(x_test)
 
 np.sqrt(mean_squared_error(y_test, rf_predictions))
-# Explained variance score: 1 is perfect prediction
 r2_score(y_test, rf_predictions)
 
 # 3. Grid Search
@@ -185,15 +184,23 @@ rf_t_search = RandomizedSearchCV(estimator=rf_t, param_distributions=grid, n_ite
 
 # Fit the random search model
 rf_t_search.fit(x_train, y_train.values.ravel())
+# rf_best_params = rf_t_search.__best_params
 
-rf_t_search.best_params_
-rf_t_search.best_estimator_
-t = RandomForestRegressor(**rf_t_search.best_params_, n_jobs=-1)
+rf_best_params = {
+    n_estimators: 1000,
+    min_samples_split: 20,
+    min_samples_leaf: 2,
+    max_features: 'auto',
+    max_depth: 140,
+    bootstrap: True,
+    n_jobs: -1
+}
+
+t = RandomForestRegressor(**rf_best_params)
 t.fit(x_train, y_train.values.ravel())
 t_predictions = t.predict(x_test)
 
 np.sqrt(mean_squared_error(y_test, t_predictions))
-# Explained variance score: 1 is perfect prediction
 r2_score(y_test, t_predictions)
 
 n_estimators = [int(x) for x in np.linspace(start=100, stop=1000, num=10)]
