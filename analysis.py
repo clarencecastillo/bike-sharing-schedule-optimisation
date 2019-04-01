@@ -1,243 +1,199 @@
 import pandas as pd
 import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
 from datetime import datetime
 import calendar
 from utils import *
+from scipy import stats
+
+SEED = 2019
+np.random.seed(SEED)
+sns.set()
 
 ### DATA EXPLORATION
 
-journeys = pd.read_csv('data/journeys.csv')
-stations = pd.read_csv('data/stations.csv')
+# 1. Journeys Data
 
-#### 1. Standard exploration
-journeys.columns
-stations.columns
-journeys.head(3)
-journeys.describe()
-stations.describe()
+journeys_df = pd.read_csv('data/journeys.csv')
 
-'''
-> Journey ID is used as surrogate identifier of trips. Consider dropping column.
+# all within month of August or September
+pd.concat([journeys_df['Start Month'], journeys_df['End Month']]).unique()
 
-> All entries take place in the year of 2017. Consider taking out Start Year and
-End Year since all rows have the same value.
+# all within year of 2017
+pd.concat([journeys_df['Start Year'], journeys_df['End Year']]).unique()
 
-> Might not yield much use keeping the Start and End timings atomic i.e. separate
-columns for Hour and Minute. Consider transforming into time series date object.
+# distribution of trip start hour
+fig = plt.figure(figsize=(14, 10))
+sns.distplot(journeys_df['Start Hour'], color='skyblue', label='Trip Start')
+sns.distplot(journeys_df['End Hour'], color='red', label='Trip End')
+plt.title('Trip Start/End Hourly Distribution', size=30)
+plt.xlabel('Hour', size=24)
+plt.ylabel('Trips %', size=24)
+plt.xticks(size=20)
+plt.yticks(size=20)
+plt.legend(fontsize=24)
+fig.savefig('images/hour_dist')
 
-> Consider calculating distance for each journey using the coordinates of Start
-and End stations.
+# drop rows which have zero duration
+is_zero_duration = journeys_df['Journey Duration'] == 0
+journeys_df[is_zero_duration].shape[0] # 1609
+journeys_df = journeys_df[~is_zero_duration]
 
-> It is observed that the minimum value for Journey Duration is 0. Can infer that
-there exists entries that have been prematurely cancelled i.e. trips that were
-immediately cancelled upon booking. Verify if such trips have the same Start and
-End timings and consider dropping those rows.
-'''
+# drop rows with outlier journey duration
+journeys_df[np.abs(stats.zscore(journeys_df['Journey Duration'])) >= 0.5].shape[0] #45247
+journeys_df = journeys_df[np.abs(stats.zscore(journeys_df['Journey Duration'])) < 0.5]
 
-#### 2.1 Transform time type into string for easy concat
+# reduce time columns into a single datetime column
 time_columns = ['Start Date', 'Start Month', 'Start Year', 'Start Hour',
 'Start Minute', 'End Date', 'End Month', 'End Year', 'End Hour', 'End Minute']
-journeys[time_columns] = journeys[time_columns].astype(str)
-journeys.dtypes
-
-#### 2.2 Transform time columns into time series datetime
+journeys_df[time_columns] = journeys_df[time_columns].astype(str)
 pad_zero = lambda x: '0' + x if len(x) == 1 else x
 for prefix in ['Start', 'End']:
-    date = journeys[prefix + ' Date'] + '/' + journeys[prefix + ' Month'] + '/' + journeys[prefix + ' Year']
-    time = journeys[prefix + ' Hour'].apply(pad_zero) + journeys[prefix + ' Minute'].apply(pad_zero)
+    date = journeys_df[prefix + ' Date'] + '/' + journeys_df[prefix + ' Month'] + '/' + journeys_df[prefix + ' Year']
+    time = journeys_df[prefix + ' Hour'].apply(pad_zero) + journeys_df[prefix + ' Minute'].apply(pad_zero)
     time_str = date + ' ' + time
-    journeys[prefix + ' Time'] = pd.to_datetime(time_str, format='%d/%m/%y %H%M')
+    journeys_df[prefix + ' Time'] = pd.to_datetime(time_str, format='%d/%m/%y %H%M')
 
-journeys.dtypes
-journeys[prefix + ' Time'].head(3)
+# drop rows which have the same start and end time (invalid)
+is_same_start_end_time = journeys_df['End Time'] == journeys_df['Start Time']
+journeys_df[is_same_start_end_time].shape[0] # 2638
+journeys_df = journeys_df[~is_same_start_end_time]
 
-#### 3. Drop unwanted columns
-unwanted_cols = time_columns + ['Journey ID']
-journeys = journeys.drop(columns = unwanted_cols)
-journeys.columns
-
-#### 4. Calculate distance (in km)
-stations_coordinates = stations[['Station ID', 'Latitude', 'Longitude']]
-for prefix in ['Start', 'End']:
-    journeys = pd.merge(journeys, stations_coordinates, left_on=prefix + ' Station ID', right_on='Station ID')
-    journeys = journeys.drop('Station ID', axis=1).rename(index=str, columns={"Longitude": prefix + " Longitude", "Latitude": prefix + " Latitude"})
-journeys['Distance'] = journeys.apply(lambda x: haversine(x['Start Longitude'], x['Start Latitude'], x['End Longitude'], x['End Latitude']), axis=1)
-journeys = journeys.drop(columns = ['Start Longitude', 'Start Latitude', 'End Longitude', 'End Latitude'])
-journeys.head(3)
-journeys['Distance'].describe()
-
-#### 5.1 Drop rows which have zero duration
-is_zero_duration = journeys['Journey Duration'] == 0
-journeys[is_zero_duration].count() # 1595
-journeys = journeys[~is_zero_duration]
-
-#### 5.2 Drop rows which have the same start and end time (invalid)
-is_same_start_end_time = journeys['End Time'] == journeys['Start Time']
-journeys[is_same_start_end_time].count() # 2612
-journeys = journeys[~is_same_start_end_time]
-
-#### 6.1 Group journeys by Station ID and by 60 minute intervals using count
-
+# group journeys by Station ID and by set window intervals
 def get_station_time_groups(prefix, granularity):
     grouper = pd.Grouper(key=prefix+' Time', freq=str(granularity) + 'Min', label='right')
-    groups = journeys.groupby([prefix+' Station ID', grouper]).size()
+    groups = journeys_df.groupby([prefix+' Station ID', grouper]).size()
     groups = groups.unstack(fill_value=0).stack() # fill nonexistent counts as 0
     return groups.reset_index()
 
-granularity = 60 # minutes
-station_groups = get_station_time_groups('Start', granularity)
-station_groups = station_groups.rename(columns={0: 'Out', 'Start Station ID': 'Station ID', 'Start Time': 'Time'})
-station_groups['In'] = get_station_time_groups('End', granularity)[0]
+granularity = 60 * 6 # minutes
+journeys_count_df = get_station_time_groups('Start', granularity)
+journeys_count_df = journeys_count_df.rename(columns={0: 'Out', 'Start Station ID': 'Station ID', 'Start Time': 'Time'})
+journeys_count_df['In'] = get_station_time_groups('End', granularity)[0]
+journeys_count_df['Delta'] = journeys_count_df['In'] - journeys_count_df['Out']
 
-# sample plot
-station_groups[station_groups['Station ID'] == 1].plot(x='Time', y=['Out'], kind='line', figsize=(60, 10))
+journeys_count_df.head(10)
 
-#### 6. Feature Engineering
+# station 1 incoming and outgoing trips
+station_1_sept_journeys = journeys_count_df[(journeys_count_df['Station ID'] == 1) & (journeys_count_df['Time'].apply(lambda t: t.month) == 8)]
+fig = plt.figure(figsize=(24, 10))
+plt.title('[Station 1] Number of Incoming and Outgoing Trips for September', size=30)
+sns.lineplot(station_1_sept_journeys['Time'], station_1_sept_journeys['Out'], color='red', label='Trip End')
+sns.lineplot(station_1_sept_journeys['Time'], station_1_sept_journeys['In'], color='skyblue', label='Trip Start')
+plt.xlabel('Time', size=24)
+plt.ylabel('Trips', size=24)
+plt.xticks(size=20)
+plt.yticks(size=20)
+plt.legend(fontsize=24)
+fig.savefig('images/station_1_sept_journeys')
 
-#### 6.1 Generate Lag
-directions = ['In', 'Out']
-periods = range(1, 11)
-# periods = range(1, 3)
+#### 6.1 Generate Footprint Data
+bike_count_cols = ['In', 'Out', 'Delta']
+t_periods = 20
+d_periods = 10
 
-# generate lag columns
-station_ids = station_groups['Station ID'].unique()
-for stationId in station_ids:
-    station_id_match = station_groups['Station ID'] == stationId
-    for direction, t_lag in [(direction, t_lag) for direction in directions for t_lag in periods]:
-        minute_lag_label = direction + ' Lag ' + str(t_lag)
-        station_groups.loc[station_id_match, minute_lag_label] = station_groups[station_id_match][[direction]].shift(t_lag).values
-        day_lag_label = direction + ' Lag Day ' + str(t_lag)
-        station_groups.loc[station_id_match, day_lag_label] = station_groups[station_id_match][[direction]].shift(int(24 * (60/granularity) * t_lag)).values
+# generate period lagged and moving average columns
+station_ids = journeys_count_df['Station ID'].unique()
+for station_id in station_ids:
+    station_id_match = journeys_count_df['Station ID'] == station_id
+    for col, t_lag in [(col, t_lag) for col in bike_count_cols for t_lag in range(1, t_periods + 1)]:
 
-# transform generated columns to int and drop shifted rows with na
-lag_columns = np.concatenate([[dir + ' Lag ' + str(t), dir + ' Lag Day ' + str(t)] for t in periods for dir in directions]).ravel().tolist()
-station_groups = station_groups.dropna()
-station_groups[lag_columns] = station_groups[lag_columns].astype(int)
+        minute_lag_label = '{} (t-{})'.format(col, t_lag)
+        journeys_count_df.loc[station_id_match, minute_lag_label] = journeys_count_df[station_id_match][[col]].shift(t_lag).values
+
+        ma_lag_label = '{} Moving Average (t-{})'.format(col, t_lag)
+        journeys_count_df.loc[station_id_match, ma_lag_label] = journeys_count_df[station_id_match][[col]].shift(periods=1).rolling(window=t_lag).mean().values
+
+# generate day lagged columns
+station_ids = journeys_count_df['Station ID'].unique()
+for station_id in station_ids:
+    station_id_match = journeys_count_df['Station ID'] == station_id
+    for col, t_lag in [(col, t_lag) for col in bike_count_cols for t_lag in range(1, d_periods + 1)]:
+
+        day_lag_label = '{} (d-{})'.format(col, t_lag)
+        journeys_count_df.loc[station_id_match, day_lag_label] = journeys_count_df[station_id_match][[col]].shift(int(24 * (60/granularity) * t_lag)).values
+
+# drop shifted rows with na
+lag_columns = journeys_count_df.columns[5:].tolist()
+journeys_count_df = journeys_count_df.dropna().reset_index(drop=True)
+
+station_1_sept_journeys = journeys_count_df[(journeys_count_df['Station ID'] == 1) & (journeys_count_df['Time'].apply(lambda t: t.month) == 8)]
+fig = plt.figure(figsize=(24, 10))
+plt.title('[Station 1] Number of Outgoing Trips for September (Lagged)', size=30)
+sns.lineplot(station_1_sept_journeys['Time'], station_1_sept_journeys['Out'], label='Outgoing Trips')
+sns.lineplot(station_1_sept_journeys['Time'], station_1_sept_journeys['Out Moving Average (t-10)'], label='Outgoing Trips Moving Average (t-10)')
+sns.lineplot(station_1_sept_journeys['Time'], station_1_sept_journeys['Out Moving Average (t-20)'], label='Outgoing Trips Moving Average (t-20)')
+plt.xlabel('Time', size=24)
+plt.ylabel('Trips', size=24)
+plt.xticks(size=20)
+plt.yticks(size=20)
+plt.legend(fontsize=24)
+fig.savefig('images/station_1_sept_journeys_lagged')
 
 # get weekdays and hour
-station_groups['Weekday'] = station_groups['Time'].apply(lambda x: calendar.day_name[x.weekday()])
-station_groups['Hour'] = station_groups['Time'].apply(lambda x: x.hour)
+journeys_count_df['Weekday'] = journeys_count_df['Time'].apply(lambda x: calendar.day_name[x.weekday()])
+journeys_count_df['Hour'] = journeys_count_df['Time'].apply(lambda x: x.hour)
 
 # one hot encoding
-station_groups = station_groups.join(pd.get_dummies(station_groups['Weekday']))
+journeys_count_df = journeys_count_df.join(pd.get_dummies(journeys_count_df['Weekday']))
 
-boxplot(station_groups, 'Weekday', 'Out')
+# get station hourly mean
+for col in bike_count_cols:
+    period_mean_label = '{} Station Period Mean'.format(col)
+    period_mean = journeys_count_df.groupby(['Station ID', 'Hour'])[col].mean().reset_index().rename(columns = {col: period_mean_label})
+    journeys_count_df = journeys_count_df.merge(period_mean)
 
-# MODELING
-# TODO: move to models.py
+stations_df = pd.read_csv('data/stations.csv')
 
-# 1. Multiple Linear regression on 'Out'
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_squared_error, r2_score
-from sklearn.model_selection import train_test_split
+import geopandas as gpd
+from shapely.geometry import Point
+from shapely.ops import nearest_points
 
-train_size = 0.7
-target = 'Out'
-seed = 100
-unwanted_cols = ['Weekday', 'Time', 'Station ID']
+# reverse station coordinates to its corresponding borough
+crs = {'init': 'epsg:4326'}
+geo_map = gpd.read_file('data/london_wards_2014/London_Ward_CityMerged.shp')
+geo_map = geo_map.to_crs(crs)
+geo_map = geo_map[['BOROUGH', 'LB_GSS_CD', 'geometry']].dissolve(by='BOROUGH').reset_index()
+stations_geometry = [Point(x,y) for x, y in zip(stations_df['Longitude'], stations_df['Latitude'])]
+stations_df = gpd.GeoDataFrame(stations_df, crs=crs, geometry=stations_geometry)
 
-# partition by time
-timestamps = station_groups['Time'].unique()
-train_cutoff = timestamps[int(len(timestamps) * train_size)]
+unwated_geo_cols = ['Latitude', 'Longitude', 'Station Name', 'geometry']
+stations_df['Borough'] = stations_df['geometry'].apply(lambda p: geo_map['LB_GSS_CD'][geo_map['geometry'].apply(lambda b: b.contains(p)).idxmax(1)])
 
-train_set = station_groups[station_groups['Time'] <= train_cutoff]
-test_set = station_groups[station_groups['Time'] > train_cutoff]
+geo_ax = geo_map.plot(color='lightgray', figsize=(20, 20))
+geo_ax.set_title("London Boroughs", size=30);
+stations_df.plot(marker='*', color='red', markersize=5, ax=geo_ax);
+min_x, min_y, max_x, max_y = stations_df.total_bounds
+x_margin = (max_x - min_x) * 0.1
+y_margin = (max_y - min_y) * 0.1
+geo_ax.set_xlim(min_x - x_margin, max_x + x_margin)
+geo_ax.set_ylim(min_y - y_margin, max_y + y_margin)
+plt.savefig('images/london_map')
 
-x_train = train_set.drop(columns=[target] + unwanted_cols)
-y_train = train_set[[target]]
-x_test = test_set.drop(columns=[target] + unwanted_cols)
-y_test = test_set[[target]]
+boroughs_df = pd.read_csv('data/london_boroughs.csv', na_values=['.'])
 
-lr = LinearRegression()
-lr.fit(x_train, y_train)
-lr_train_predictions = lr.predict(x_train)
-lr_predictions = lr.predict(x_test)
+# parse currency format
+boroughs_df['Household Median Income Estimates'] = boroughs_df['Household Median Income Estimates'].replace('[\£,]', '', regex=True).astype(float)
 
-# The mean squared error
-np.sqrt(mean_squared_error(y_test, lr_predictions))
-# Explained variance score: 1 is perfect prediction
-r2_score(y_test, lr_predictions)
+# set boroughs df na values as mean
+boroughs_df.isna().sum()
+boroughs_df = boroughs_df.fillna(boroughs_df.mean())
+boroughs_df = boroughs_df.rename(columns={c:'Borough {}'.format(c) for c in boroughs_df.columns})
 
-# 2. Random Forest with Tuning
+cols_to_plot = [
+    ['Cars', 'Cycling Adults at Least Once per Month', 'Public Transport Accessibility Average Score', 'Workplace Number of Jobs'],
+    ['Population Estimate', 'Gross Annual Pay', 'Working-Age People With Degree', 'Active Businesses']
+]
+fig, ax = plt.subplots(2,4, figsize=(24, 10))
+for x, row in enumerate(cols_to_plot):
+    for y, col in enumerate(cols_to_plot[x]):
+        sns.distplot(boroughs_df['Borough ' + col], ax=ax[x][y], kde=False)
+fig.savefig('images/boroughs_dist')
 
-from sklearn.ensemble import RandomForestRegressor
+# merge borugh and station data
+merged_df = stations_df.merge(boroughs_df, how='inner', left_on='Borough', right_on='Borough Code')
+merged_df = merged_df.drop(columns=['Latitude', 'Longitude', 'Borough', 'geometry', 'Borough Name', 'Station Name', 'Borough Code'])
+merged_df = merged_df.merge(journeys_count_df, on='Station ID')
 
-rf = RandomForestRegressor(n_estimators=100, random_state=seed, n_jobs=-1)
-rf.fit(x_train, y_train.values.ravel())
-rf_predictions = rf.predict(x_test)
-
-np.sqrt(mean_squared_error(y_test, rf_predictions))
-r2_score(y_test, rf_predictions)
-
-# 3. Grid Search
-from sklearn.model_selection import RandomizedSearchCV
-
-grid = { 'n_estimators': [int(x) for x in np.linspace(start=100, stop=1000, num=10)],
-         'max_features': ['auto', 'sqrt'],
-         'max_depth': [int(x) for x in np.linspace(50, 150, num = 11)] + [None],
-         'min_samples_split': [10, 15, 20],
-         'min_samples_leaf': [1, 2, 4],
-         'bootstrap': [True, False] }
-
-rf_t = RandomForestRegressor()
-rf_t_search = RandomizedSearchCV(estimator=rf_t, param_distributions=grid, n_iter=10, cv=3, verbose=2, random_state=seed, n_jobs=-1)
-
-# Fit the random search model
-rf_t_search.fit(x_train, y_train.values.ravel())
-# rf_best_params = rf_t_search.__best_params
-
-rf_best_params = {
-    n_estimators: 1000,
-    min_samples_split: 20,
-    min_samples_leaf: 2,
-    max_features: 'auto',
-    max_depth: 140,
-    bootstrap: True,
-    n_jobs: -1
-}
-
-t = RandomForestRegressor(**rf_best_params)
-t.fit(x_train, y_train.values.ravel())
-t_predictions = t.predict(x_test)
-
-np.sqrt(mean_squared_error(y_test, t_predictions))
-r2_score(y_test, t_predictions)
-
-n_estimators = [int(x) for x in np.linspace(start=100, stop=1000, num=10)]
-max_features = ['auto']
-max_depth = [int(x) for x in np.linspace(95, 105, num = 11)]
-min_samples_split = [9, 10, 15, 20]
-min_samples_leaf = [1, 2, 3]
-bootstrap = [True]
-random_grid = {'n_estimators': n_estimators,
-               'max_features': max_features,
-               'max_depth': max_depth,
-               'min_samples_split': min_samples_split,
-               'min_samples_leaf': min_samples_leaf,
-               'bootstrap': bootstrap}
-
-rf_t = RandomForestRegressor()
-rf_t_search = RandomizedSearchCV(estimator=rf_t, param_distributions=random_grid, n_iter=10, cv=3, verbose=2, random_state=seed, n_jobs=-1)
-# Fit the random search model
-rf_t_search.fit(x_train, y_train.values.ravel())
-
-# 4. xgboost
-
-
-
-# 5. LSTM
-
-from keras.models import Sequential
-from keras.layers import Dense, Dropout, LSTM
-
-lstm_x_train = x_train.values.reshape((x_train.shape[0], 1, x_train.shape[1]))
-lstm_x_test = x_test.values.reshape((x_test.shape[0], 1, x_test.shape[1]))
-
-lstm = Sequential()
-lstm.add(LSTM(100, input_shape=(lstm_x_train.shape[1], lstm_x_train.shape[2])))
-lstm.add(Dense(1))
-lstm.compile(loss='mean_squared_error', optimizer='adam')
-lstm.fit(lstm_x_train, y_train, epochs=100, batch_size=512, validation_data=(lstm_x_test, y_test), verbose=2, shuffle=False)
-
-# calculate RMSE
-np.sqrt(mean_squared_error(y_test, lstm.predict(lstm_x_test)))
+merged_df.to_csv('data/clean.csv', index=False)

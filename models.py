@@ -1,119 +1,108 @@
 import pandas as pd
 import numpy as np
-from datetime import datetime
-import calendar
-from utils import *
-from xgboost import XGBRegressor
+from sklearn.metrics import mean_squared_error, explained_variance_score, r2_score
 from sklearn.model_selection import train_test_split
-from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
-from sklearn.metrics import mean_squared_error, r2_score
-import seaborn as sns
-%matplotlib inline
 import matplotlib.pyplot as plt
-from sklearn.feature_selection import RFE
+import seaborn as sns
+from sklearn.preprocessing import StandardScaler
 
-# data import
-# journeys and stations optional
-# journeys = pd.read_csv('data/journeys.csv')
-# stations = pd.read_csv('data/stations.csv')
-station_groups = pd.read_csv('data/station_groups.csv')
+data_df = pd.read_csv('data/clean.csv')
 
-# check colnames + see unwanted columns
-station_groups.columns
-'''
- Index(['Unnamed: 0', 'Station ID', 'Time', 'Out', 'In', 'In Lag 1',
-       'In Lag Day 1', 'In Lag 2', 'In Lag Day 2', 'In Lag 3', 'In Lag Day 3',
-       'In Lag 4', 'In Lag Day 4', 'In Lag 5', 'In Lag Day 5', 'In Lag 6',
-       'In Lag Day 6', 'In Lag 7', 'In Lag Day 7', 'In Lag 8', 'In Lag Day 8',
-       'In Lag 9', 'In Lag Day 9', 'In Lag 10', 'In Lag Day 10', 'Out Lag 1',
-       'Out Lag Day 1', 'Out Lag 2', 'Out Lag Day 2', 'Out Lag 3',
-       'Out Lag Day 3', 'Out Lag 4', 'Out Lag Day 4', 'Out Lag 5',
-       'Out Lag Day 5', 'Out Lag 6', 'Out Lag Day 6', 'Out Lag 7',
-       'Out Lag Day 7', 'Out Lag 8', 'Out Lag Day 8', 'Out Lag 9',
-       'Out Lag Day 9', 'Out Lag 10', 'Out Lag Day 10', 'Weekday', 'Hour',
-       'Friday', 'Monday', 'Saturday', 'Sunday', 'Thursday', 'Tuesday',
-       'Wednesday'],
-      dtype='object')
-'''
-# station_groups.describe()
-unwanted_cols = ['Hour', 'Weekday', 'Unnamed: 0', 'Station ID', 'Time']
-
-# 1: xgb modelling
-
-# train-test split
-train_size = 0.7
+validation_size = 0.2
 target = 'Out'
-seed = 100
+seed = 2019
+
+present_cols = ['Out', 'In', 'Delta']
+x_cols = [c for c in data_df.columns if c not in ['Station ID', 'Time', 'Weekday'] + present_cols]
 
 # partition by time
-timestamps = station_groups['Time'].unique()
-train_cutoff = timestamps[int(len(timestamps) * train_size)]
+dates = np.sort(data_df['Time'].unique())
+split_date = dates[int(dates.shape[0] * (1 - validation_size))]
+train_split = data_df['Time'] <= split_date
 
-# convert time to months; we drop day since already there
-station_groups['Time'] = pd.to_datetime(station_groups['Time'])
-station_groups[['Time']].sort_values(by = 'Time')
-train_set = station_groups[station_groups['Time'] <= train_cutoff]
-test_set = station_groups[station_groups['Time'] > train_cutoff]
-x_train = train_set.drop(columns=[target] + unwanted_cols)
-y_train = train_set[[target]]
-x_test = test_set.drop(columns=[target] + unwanted_cols)
-y_test = test_set[[target]]
-# data plotting
-# predict 'out'
-# plot relations between days
-sns.stripplot(x = "Weekday", y = "Out", data = station_groups, jitter = True)
+x_df = data_df[x_cols]
+y_df = data_df[target]
+x_train, x_test = x_df.loc[train_split], x_df.loc[~(train_split)]
+y_train, y_test = y_df.loc[train_split], y_df.loc[~(train_split)]
 
-# creation of xgb model - will use regressor
-xgb_base = XGBRegressor()
-xgb_base.fit(x_train, y_train)
-'''
-XGBRegressor(base_score=0.5, booster='gbtree', colsample_bylevel=1,
-       colsample_bytree=1, gamma=0, learning_rate=0.1, max_delta_step=0,
-       max_depth=3, min_child_weight=1, missing=None, n_estimators=100,
-       n_jobs=1, nthread=None, objective='reg:linear', random_state=0,
-       reg_alpha=0, reg_lambda=1, scale_pos_weight=1, seed=None,
-       silent=True, subsample=1)
-'''
-# predict on results
-base_predictions = xgb_base.predict(x_test)
-np.sqrt(mean_squared_error(y_test, base_predictions)) # 1.7213931781066434
-r2_score(y_test, base_predictions) # 0.7034462247285119
-xgb_base.get_params
-# 1.1: rfe
-# TO DO: cross-validation of model (time-series)/hyper-parameter tuning/rfe
-x_train.shape # (518883, 48) - 48 features
-xgb_rfe = XGBRegressor()
-selector = RFE(xgb_rfe)
-y_train.shape
-selector.fit(x_train, y_train.values.ravel())
-print("done")
-rfe_predictions = selector.predict(x_test)
-score = r2_score(y_test, rfe_predictions)
-# we can also do a search through the possible values of features from 5-24; takes quite long maybe jsut stick with half
-'''
-rfe_ls = []
-for i in range(5, 25):
-    selector = RFE(xgb_rfe)
-    selector.fit(x_train, y_train.values.ravel())
-    rfe_ls.append((selector, r2_score(y_test, rfe_predictions)))
-print(x[1] for x in rfe_ls)
-'''
+eval_scores = {
+    'name': [],
+    'rmse': [],
+    'r2': [],
+    'exp_var': []
+}
 
-# 1.2: gridsearch for optimal parameters
-# should gridsearch on rfe/non-rfe and compare?
-params = {
-        'min_child_weight': [1, 5, 10],
-        'gamma': [0, 0.5, 1, 1.5, 2],
-        'subsample': [0.6, 0.8, 1.0],
-        'colsample_bytree': [0.6, 0.8, 1.0],
-        'max_depth': [3, 4, 5]
-        }
-xgb_gs = XGBRegressor(base_score=0.5, booster='gbtree', colsample_bylevel=1,
-       colsample_bytree=1, gamma=0, learning_rate=0.1, max_delta_step=0,
-       max_depth=3, min_child_weight=1, missing=None, n_estimators=100,
-       n_jobs=1, nthread=None, objective='reg:linear', random_state=0,
-       reg_alpha=0, reg_lambda=1, scale_pos_weight=1, seed=None,
-       silent=True, subsample=1)
-gs = GridSearchCV(xgb_gs, param_grid = params, scoring = ['r2', 'neg_mean_squared_error'])
-grid.best_estimator_
-# fit and predict as per usual stuff above
+# benchmark
+benchmark_pred = x_test['Out (d-1)']
+eval_scores['name'].append('BENCHMARK')
+eval_scores['rmse'].append(np.sqrt(mean_squared_error(y_test, benchmark_pred)))
+eval_scores['r2'].append(r2_score(y_test, benchmark_pred))
+eval_scores['exp_var'].append(explained_variance_score(y_test, benchmark_pred))
+
+scaler = StandardScaler().fit(x_df)
+x_train = scaler.transform(x_train)
+x_test = scaler.transform(x_test)
+
+def evaluate_model(name, regressor):
+    regressor.fit(x_train, y_train)
+    pred = regressor.predict(x_test)
+    eval_scores['name'].append(name)
+    eval_scores['rmse'].append(np.sqrt(mean_squared_error(y_test, pred)))
+    eval_scores['r2'].append(r2_score(y_test, pred))
+    eval_scores['exp_var'].append(explained_variance_score(y_test, pred))
+    return eval_scores['rmse'][-1], eval_scores['r2'][-1], eval_scores['exp_var'][-1]
+
+def plot_feature_importance(name, importance, save=False):
+    x, y = (list(x) for x in zip(*sorted(zip(importance, x_cols), key=lambda x: np.abs(x[0]), reverse=True)))
+    fig, ax = plt.subplots(figsize=(20, 20))
+    sns.barplot(x, y, ax=ax)
+    plt.show()
+    if save:
+        fig.savefig('images/{}'.format(name), dpi=fig.dpi)
+
+
+from sklearn.linear_model import LinearRegression
+model_lr = LinearRegression()
+model_lr.fit(x_train, y_train)
+evaluate_model('LR', model_lr)
+plot_feature_importance('LR', model_lr.coef_)
+
+from sklearn.ensemble import RandomForestRegressor
+model_rf = RandomForestRegressor(n_estimators=10, random_state=seed, n_jobs=-1)
+model_rf.fit(x_train, y_train)
+evaluate_model('RF', model_rf)
+plot_feature_importance('RF', model_rf.feature_importances_)
+
+from xgboost import XGBRegressor
+model_xgb = XGBRegressor(random_state=seed)
+model_xgb = model_xgb.fit(x_train, y_train)
+evaluate_model('XGB', model_xgb)
+plot_feature_importance('XGB', model_xgb.feature_importances_)
+
+from pyearth import Earth
+model_mars = Earth()
+model_mars = model_mars.fit(x_train, y_train)
+evaluate_model('MARS', model_mars)
+print(model_mars.summary())
+
+from sklearn.ensemble import GradientBoostingRegressor
+model_gbr = GradientBoostingRegressor()
+model_gbr.fit(x_train, y_train)
+evaluate_model('GBR', model_gbr)
+plot_feature_importance('GBR', model_gbr.feature_importances_)
+
+from sklearn.model_selection import GridSearchCV
+
+
+rf_param_grid = {
+    'n_estimators': [100, 200, 300],
+    'max_depth': [10, 50, 100],
+    'random_state': [seed]
+}
+
+rf_gridsearch = GridSearchCV(RandomForestRegressor(), rf_param_grid, cv=5, verbose=False, n_jobs=-1)
+rf_gridsearch = rf_gridsearch.fit(x_train, y_train)
+model_rf_tuned = rf_gridsearch.best_estimator_
+evaluate_model('RF_T', model_rf_tuned)
+plot_feature_importance(model_rf_tuned.feature_importances_)
+rf_gridsearch.best_params_
